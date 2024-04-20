@@ -1,0 +1,222 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ChartPrime
+
+
+//@version=5
+indicator(title='Market Bias (CEREBR)', shorttitle='Market Bias', overlay=true)
+
+//#region -----> INPUTS, FUCNTIONS
+
+// FUNCTIONS
+//@function This function forces the current timeframe on inputs that shouldn't take lower timeframes
+FORCE_CTF(str_tf) =>
+    i_tf_sec = timeframe.in_seconds(str_tf)
+    ctf_sec = timeframe.in_seconds('')
+    
+    // Returns the CTF if the passed timeframe is lower
+    i_tf_sec < ctf_sec ? '' : str_tf
+//
+
+// INPUTS
+ha_htf = FORCE_CTF(input.timeframe('', 'Timeframe', tooltip="This timeframe must be equal to or greater than the chart's timeframe", group="HA Market Bias"))
+ha_len = input(100, 'Period', group="HA Market Bias")
+ha_len2 = input(100, 'Smoothing', group="HA Market Bias")
+
+show_ha = input.bool(true, "Show HA Candles", inline='ha/mb display', group='Display Settings')
+show_mb = input.bool(true, "Show Market Bias", inline='ha/mb display', group='Display Settings')
+col_bull = input.color(color.lime, 'Color: Bullish', inline='bull/bear color', group='Display Settings', display=display.none)
+col_bear = input.color(color.red, 'Bearish', inline='bull/bear color', group='Display Settings', display=display.none)
+
+
+// These add an offset during data importation to avoid lookahead bias
+indexHighTF = timeframe.in_seconds(ha_htf) == timeframe.in_seconds('') ? 0 : barstate.isrealtime ? 1 : 0
+indexCurrTF = timeframe.in_seconds(ha_htf) == timeframe.in_seconds('') ? 0 : barstate.isrealtime ? 0 : 1
+
+//@function Handles the import of data from other timeframes, while preventing repainting
+//@param _resolution (str) : This is the timeframe to import data from.
+//@param _expression (float | int) : This is the data to be imported
+f_no_repaint_request(string _resolution, _expression) =>
+     request.security(syminfo.tickerid, _resolution, _expression[indexHighTF])[indexCurrTF]
+//#endregion
+
+
+
+//#region -----> CALCULATIONS
+
+// Smoothen the OHLC values 
+o = ta.ema(open, ha_len)
+c = ta.ema(close, ha_len)
+h = ta.ema(high, ha_len)
+l = ta.ema(low, ha_len)
+
+// Calculate the Heikin Ashi OHLC values from it
+haclose = f_no_repaint_request(ha_htf, (o + h + l + c) / 4)
+xhaopen = f_no_repaint_request(ha_htf, (o + c) / 2)
+haopen = na(xhaopen[1]) ? (o + c) / 2 : (xhaopen[1] + haclose[1]) / 2
+hahigh = math.max(h, math.max(haopen, haclose))
+halow = math.min(l, math.min(haopen, haclose))
+
+// Smoothen the Heiken Ashi Candles
+o2 = f_no_repaint_request(ha_htf, ta.ema(haopen, ha_len2))
+c2 = f_no_repaint_request(ha_htf, ta.ema(haclose, ha_len2))
+h2 = f_no_repaint_request(ha_htf, ta.ema(hahigh, ha_len2))
+l2 = f_no_repaint_request(ha_htf, ta.ema(halow, ha_len2))
+
+ha_avg = (h2 + l2) / 2
+
+
+//TODO: Publish the Oscillator version of the indicator
+// Oscillator {
+osc_len = input.int(7, "Oscillator Period", group="HA Market Bias")
+
+osc_bias = 100 * (c2 - o2)
+osc_smooth = ta.ema(osc_bias, osc_len)
+
+sigcolor = switch
+    (osc_bias > 0) and (osc_bias >= osc_smooth) => color.new(col_bull, 35)
+    (osc_bias > 0) and (osc_bias < osc_smooth) => color.new(col_bull, 75)
+    (osc_bias < 0) and (osc_bias <= osc_smooth) => color.new(col_bear, 35)
+    (osc_bias < 0) and (osc_bias > osc_smooth) => color.new(col_bear, 75)
+    => color(na)
+// }
+
+//#endregion
+    
+
+
+//#region ----->  PLOTS, ALERTS {
+
+// Plots
+p_h = plot(h2, "Bias High", color=color(na), display=display.data_window, editable=false)
+p_l = plot(l2, "Bias Low", color=color(na), display=display.data_window, editable=false)
+p_avg = plot(ha_avg, "Bias Avergae", color=color(na), display=display.data_window, editable=false)
+fill(p_l, p_h, show_mb ? sigcolor : na)
+
+col = o2 > c2 ? col_bear : col_bull
+plotcandle(o2, h2, l2, c2, title='heikin smoothed', color=col, display=show_ha ? display.pane : display.data_window, editable=false)
+
+
+// Alerts
+// Bullish Trend Switch (Bearish -> Bullish)
+alertcondition(ta.change(ta.change(math.sign(osc_bias)) > 0), 
+  'Bullish Trend Switch (Bearish -> Bullish)', '{{exchange}}:{{ticker}}: Trend is now Bullish.')
+
+// Bullish Trend Strengthens
+alertcondition(osc_bias > 0 and ta.change(math.sign(osc_bias - osc_smooth)) > 0,
+  'Bullish Trend Strengthens', '{{exchange}}:{{ticker}}: Bullish Trend is now Stronger.')
+
+// Bullish Trend Weakens
+alertcondition(osc_bias > 0 and ta.change(math.sign(osc_bias - osc_smooth)) < 0,
+  'Bullish Trend Weakens', '{{exchange}}:{{ticker}}: Bullish Trend is now Weaker.')
+
+// Bearish Trend Switch (Bullish -> Bearish)
+alertcondition(ta.change(ta.change(math.sign(osc_bias)) < 0), 
+  'Bearish Trend Switch (Bullish -> Bearish)', '{{exchange}}:{{ticker}}: Trend is now Bearish.')
+
+// Bearish Trend Strengthens
+alertcondition(osc_bias < 0 and ta.change(math.sign(osc_bias - osc_smooth)) < 0,
+  'Bearish Trend Strengthens', '{{exchange}}:{{ticker}}: Bearish Trend is now Stronger.')
+
+// Bearish Trend Weakens
+alertcondition(osc_bias < 0 and ta.change(math.sign(osc_bias - osc_smooth)) > 0,
+  'Bearish Trend Weakens', '{{exchange}}:{{ticker}}: Bearish Trend is now Weaker.')
+//#endregion
+
+
+
+// CUSTOM ALERTS : To enable this functionality, Select and uncomment (Cmd (or Ctrl) + /) the following code block, starting from the next line.
+// // {
+// use_custom_alerts = input.bool(false, 'Use Custom Alert Messages', group='Alert Messages', display=display.none)
+// i_alert_bull_trend_switch = input.text_area('New Bullish Trend', 'Bullish Trend Switch', group='Alert Messages', display=display.none)
+// i_alert_bull_trend_strengthen = input.text_area('New Strong Bullish Trend', 'Bullish Trend Strengthens', group='Alert Messages', display=display.none)
+// i_alert_bull_trend_weaken = input.text_area('New Weak Bullish Trend', 'Bullish Trend Weakens', group='Alert Messages', display=display.none)
+// i_alert_bear_trend_switch = input.text_area('New Bearish Trend', 'Bearish Trend Switch', group='Alert Messages', display=display.none)
+// i_alert_bear_trend_strengthen = input.text_area('New Strong Bearish Trend', 'Bearish Trend Strengthens', group='Alert Messages', display=display.none)
+// i_alert_bear_trend_weaken = input.text_area('New Weak Bearish Trend', 'Bearish Trend Weakens', group='Alert Messages', display=display.none)
+
+
+// // Bullish Trend Switch (Bearish -> Bullish)
+// if (ta.change(ta.change(math.sign(osc_bias)) > 0))
+//     alert(i_alert_bull_trend_switch, alert.freq_once_per_bar)
+
+// // Bullish Trend Strengthens
+// if (osc_bias > 0 and ta.change(math.sign(osc_bias - osc_smooth)) > 0)
+//     alert(i_alert_bull_trend_strengthen, alert.freq_once_per_bar)
+
+// // Bullish Trend Weakens
+// if (osc_bias > 0 and ta.change(math.sign(osc_bias - osc_smooth)) < 0)
+//     alert(i_alert_bull_trend_weaken, alert.freq_once_per_bar)
+
+// // Bearish Trend Switch (Bullish -> Bearish)
+// if (ta.change(ta.change(math.sign(osc_bias)) < 0))
+//     alert(i_alert_bear_trend_switch, alert.freq_once_per_bar)
+
+// // Bearish Trend Strengthens
+// if (osc_bias < 0 and ta.change(math.sign(osc_bias - osc_smooth)) < 0)
+//     alert(i_alert_bear_trend_strengthen, alert.freq_once_per_bar)
+
+// // Bearish Trend Weakens
+// if (osc_bias < 0 and ta.change(math.sign(osc_bias - osc_smooth)) > 0)
+//     alert(i_alert_bear_trend_weaken, alert.freq_once_per_bar)
+
+// // }
+
+    twin filter
+study(title="Twin Range Filter", overlay=true)
+
+source = input(defval=close, title="Source")
+
+// Smooth Average Range
+
+per1 = input(defval=27, minval=1, title="Fast period")
+mult1 = input(defval=1.6, minval=0.1, title="Fast range")
+
+per2 = input(defval=55, minval=1, title="Slow period")
+mult2 = input(defval=2, minval=0.1, title="Slow range")
+
+smoothrng(x, t, m) =>
+    wper = t * 2 - 1
+    avrng = ema(abs(x - x[1]), t)
+    smoothrng = ema(avrng, wper) * m
+    smoothrng
+smrng1 = smoothrng(source, per1, mult1)
+smrng2 = smoothrng(source, per2, mult2)
+smrng = (smrng1 + smrng2) / 2
+
+// Range Filter
+
+rngfilt(x, r) =>
+    rngfilt = x
+    rngfilt := x > nz(rngfilt[1]) ? x - r < nz(rngfilt[1]) ? nz(rngfilt[1]) : x - r : 
+       x + r > nz(rngfilt[1]) ? nz(rngfilt[1]) : x + r
+    rngfilt
+filt = rngfilt(source, smrng)
+
+upward = 0.0
+upward := filt > filt[1] ? nz(upward[1]) + 1 : filt < filt[1] ? 0 : nz(upward[1])
+downward = 0.0
+downward := filt < filt[1] ? nz(downward[1]) + 1 : filt > filt[1] ? 0 : nz(downward[1])
+
+hband = filt + smrng
+lband = filt - smrng
+
+longCond = bool(na)
+shortCond = bool(na)
+longCond := source > filt and source > source[1] and upward > 0 or source > filt and source < source[1] and upward > 0
+shortCond := source < filt and source < source[1] and downward > 0 or source < filt and source > source[1] and downward > 0
+
+CondIni = 0
+CondIni := longCond ? 1 : shortCond ? -1 : CondIni[1]
+
+long = longCond and CondIni[1] == -1
+short = shortCond and CondIni[1] == 1
+
+// Plotting
+
+plotshape(long, title="Long", text="Long", style=shape.labelup, textcolor=color.black, size=size.tiny, location=location.belowbar, color=color.lime, transp=0)
+plotshape(short, title="Short", text="Short", style=shape.labeldown, textcolor=color.white, size=size.tiny, location=location.abovebar, color=color.red, transp=0)
+
+// Alerts
+
+alertcondition(long, title="Long", message="Long")
+alertcondition(short, title="Short", message="Short")
